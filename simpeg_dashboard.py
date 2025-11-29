@@ -15,35 +15,26 @@ st.set_page_config(
     layout="wide"
 )
 
-# ================== Palet Warna Konsisten ==================
+# ================== Palet Warna ==================
 COLOR_MAP = {
     "LAKI-LAKI": "#2196f3",
     "PEREMPUAN": "#e91e63",
-    "SD": "#8bc34a",
-    "SMP": "#4caf50",
-    "SMA": "#009688",
-    "D1": "#00bcd4",
-    "D2": "#03a9f4",
-    "D3": "#3f51b5",
-    "D4": "#673ab7",
-    "S1": "#9c27b0",
-    "S2": "#e91e63",
-    "S3": "#f44336"
+    "SD": "#8bc34a", "SMP": "#4caf50", "SMA": "#009688",
+    "D1": "#00bcd4", "D2": "#03a9f4", "D3": "#3f51b5", "D4": "#673ab7",
+    "S1": "#9c27b0", "S2": "#e91e63", "S3": "#f44336"
 }
 
-# ================== Inisialisasi Data ==================
+# ================== Struktur Data ==================
 EXPECTED_COLS = [
     "NAMA","NIP","GELAR DEPAN","GELAR BELAKANG","TEMPAT LAHIR","TANGGAL LAHIR",
     "JENIS KELAMIN","AGAMA","JENIS KAWIN","NIK","NOMOR HP","EMAIL","ALAMAT",
     "NPWP","BPJS","JENIS PEGAWAI","KEDUDUKAN HUKUM","STATUS CPNS PNS",
     "KARTU ASN VIRTUAL","TMT CPNS","TMT PNS","GOL AWAL","GOL AKHIR",
     "TMT GOLONGAN","MK TAHUN","MK BULAN","JENIS JABATAN","NAMA JABATAN",
-    "TMT JABATAN","TINGKAT PENDIDIKAN","NAMA PENDIDIKAN","NAMA UNOR","UNOR INDUK"
+    "TMT JABATAN","TINGKAT PENDIDIKAN","NAMA PENDIDIKAN","NAMA UNOR","UNOR INDUK","FOTO"
 ]
 
-if "pegawai" not in st.session_state:
-    st.session_state.pegawai = pd.DataFrame(columns=EXPECTED_COLS)
-
+# ================== Session State ==================
 if "users" not in st.session_state:
     st.session_state.users = {
         "admin": {
@@ -51,11 +42,10 @@ if "users" not in st.session_state:
             "role": "Admin"
         }
     }
-
 if "auth" not in st.session_state:
     st.session_state.auth = {"logged_in": False, "username": None, "role": None}
 
-# ================== Database & storage ==================
+# ================== Database ==================
 DB_FILE = "simpeg.db"
 os.makedirs("images", exist_ok=True)
 
@@ -63,42 +53,45 @@ def conn_db():
     return sqlite3.connect(DB_FILE)
 
 def init_db():
+    """Buat tabel pegawai jika belum ada, lalu pastikan kolom lengkap tanpa drop data."""
     with conn_db() as conn:
         cur = conn.cursor()
         cur.execute("""
         CREATE TABLE IF NOT EXISTS pegawai (
-            NIP TEXT PRIMARY KEY,
-            NAMA TEXT,
-            NAMA_JABATAN TEXT,
-            JENIS_JABATAN TEXT,
-            UNOR_INDUK TEXT,
-            NAMA_UNOR TEXT,
-            TMT_JABATAN TEXT,
-            JENIS_KELAMIN TEXT,
-            TANGGAL_LAHIR TEXT,
-            TINGKAT_PENDIDIKAN TEXT,
-            NAMA_PENDIDIKAN TEXT,
-            EMAIL TEXT,
-            NOMOR_HP TEXT,
-            ALAMAT TEXT,
-            FOTO TEXT
+            NIP TEXT PRIMARY KEY
         )
         """)
+        conn.commit()
+    ensure_columns()
+
+def ensure_columns():
+    """Tambahkan kolom-kolom yang belum ada agar sesuai EXPECTED_COLS, tanpa menghapus data lama."""
+    with conn_db() as conn:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(pegawai)")
+        existing_cols = [row[1] for row in cur.fetchall()]
+        # Tambah kolom yang belum ada; gunakan quote agar aman untuk nama dengan spasi
+        for col in EXPECTED_COLS:
+            if col not in existing_cols:
+                cur.execute(f"ALTER TABLE pegawai ADD COLUMN '{col}' TEXT")
         conn.commit()
 
 def load_data():
     with conn_db() as conn:
-        df = pd.read_sql_query("SELECT * FROM pegawai", conn)
-    return df
+        return pd.read_sql_query("SELECT * FROM pegawai", conn)
 
 def save_row(row: dict):
-    # Insert or replace single row by NIP
+    """Insert/replace satu baris berdasarkan NIP."""
+    for col in EXPECTED_COLS:
+        row.setdefault(col, "")
     with conn_db() as conn:
         cols = list(row.keys())
         placeholders = ",".join(["?"] * len(cols))
-        values = [row[c] for c in cols]
+        values = [row.get(c, "") for c in cols]
+        # Quote setiap nama kolom agar aman terhadap spasi
+        quoted_cols = ",".join([f'"{c}"' for c in cols])
         conn.execute(
-            f"INSERT OR REPLACE INTO pegawai ({','.join(cols)}) VALUES ({placeholders})",
+            f"INSERT OR REPLACE INTO pegawai ({quoted_cols}) VALUES ({placeholders})",
             values
         )
         conn.commit()
@@ -109,13 +102,60 @@ def delete_by_nip(nip: str):
         conn.commit()
 
 def replace_all(df: pd.DataFrame):
-    # Replace entire table with df
+    """Ganti seluruh isi tabel pegawai dengan df; tambahkan kolom yang kurang, urutkan sesuai EXPECTED_COLS."""
+    # Tambahkan kolom yang tidak ada dalam df
+    for col in EXPECTED_COLS:
+        if col not in df.columns:
+            df[col] = ""
+    # Urutkan kolom
+    df = df[EXPECTED_COLS]
     with conn_db() as conn:
         conn.execute("DELETE FROM pegawai")
         if not df.empty:
             df.to_sql("pegawai", conn, if_exists="append", index=False)
 
-# Init DB & session pegawai
+# ================== Backup & Restore ==================
+def backup_data():
+    df = load_data()
+    st.subheader("Backup Data Pegawai")
+    if not df.empty:
+        # Backup ke CSV
+        csv_data = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="💾 Backup Data Pegawai (CSV)",
+            data=csv_data,
+            file_name="backup_pegawai.csv",
+            mime="text/csv"
+        )
+        # Backup ke Excel
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Pegawai")
+        st.download_button(
+            label="💾 Backup Data Pegawai (Excel)",
+            data=output.getvalue(),
+            file_name="backup_pegawai.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("Tidak ada data pegawai untuk dibackup.")
+
+def restore_data():
+    st.subheader("Restore Data Pegawai dari Backup")
+    uploaded_file = st.file_uploader("Pilih file backup (CSV/Excel)", type=["csv","xlsx"])
+    if uploaded_file:
+        df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
+        df_new.columns = [str(c).strip().upper() for c in df_new.columns]
+        # Tambahkan kolom yang kurang agar sesuai EXPECTED_COLS
+        for col in EXPECTED_COLS:
+            if col not in df_new.columns:
+                df_new[col] = ""
+        df_new = df_new[EXPECTED_COLS]
+        replace_all(df_new)
+        st.session_state.pegawai = load_data()
+        st.success("Data pegawai berhasil direstore dari backup!")
+
+# Init DB & load pegawai
 init_db()
 if "pegawai" not in st.session_state:
     st.session_state.pegawai = load_data()
@@ -132,13 +172,10 @@ def login(username, password):
 def logout():
     st.session_state.auth = {"logged_in": False, "username": None, "role": None}
 
-def is_admin():
-    return st.session_state.auth["role"] == "Admin"
+def is_admin(): return st.session_state.auth["role"] == "Admin"
+def is_supervisor(): return st.session_state.auth["role"] == "Supervisor"
 
-def is_supervisor():
-    return st.session_state.auth["role"] == "Supervisor"
-
-# ================== CSS ==================
+# ================== CSS & Header ==================
 st.markdown("""
     <style>
     .card {
@@ -158,7 +195,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ================== Header ==================
 st.markdown('<h1 style="text-align:center;">SISTEM INFORMASI KEPEGAWAIAN</h1>', unsafe_allow_html=True)
 st.markdown('<h3 style="text-align:center;color:gray;">Halaman Admin/User/Supervisor</h3>', unsafe_allow_html=True)
 
@@ -210,13 +246,11 @@ if menu == "Dashboard":
     with col4:
         st.markdown(f'<div class="card" style="background:linear-gradient(135deg,#4caf50,#81c784);">👥<h4>PEGAWAI</h4><h2>{total}</h2></div>', unsafe_allow_html=True)
 
-    # Chart interaktif gender di dashboard
+    # Pie chart gender
     if not df.empty and "JENIS KELAMIN" in df.columns:
         jk_series = df["JENIS KELAMIN"].astype(str).str.strip().str.upper()
-        label_map = {
-            "M":"LAKI-LAKI","L":"LAKI-LAKI","PRIA":"LAKI-LAKI","LAKI-LAKI":"LAKI-LAKI",
-            "F":"PEREMPUAN","P":"PEREMPUAN","WANITA":"PEREMPUAN","PEREMPUAN":"PEREMPUAN"
-        }
+        label_map = {"M":"LAKI-LAKI","L":"LAKI-LAKI","PRIA":"LAKI-LAKI","LAKI-LAKI":"LAKI-LAKI",
+                     "F":"PEREMPUAN","P":"PEREMPUAN","WANITA":"PEREMPUAN","PEREMPUAN":"PEREMPUAN"}
         jk_mapped = jk_series.map(lambda x: label_map.get(x, x))
         jk_counts = jk_mapped.value_counts().reset_index()
         jk_counts.columns = ["Jenis Kelamin","Jumlah"]
@@ -230,6 +264,7 @@ if menu == "Dashboard":
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    # Manajemen user (Admin)
     if is_admin():
         st.markdown("---")
         st.subheader("➕ Tambah pengguna")
@@ -264,12 +299,13 @@ elif menu == "Pegawai":
         if uploaded_file:
             df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
             df_new.columns = [str(c).strip().upper() for c in df_new.columns]
-            if all(col in df_new.columns for col in EXPECTED_COLS):
-                st.session_state.pegawai = df_new
-                st.success("Data pegawai berhasil diimpor!")
-            else:
-                st.error("Kolom file tidak sesuai. Harus ada semua header berikut:")
-                st.write(EXPECTED_COLS)
+            # Tambahkan kolom yang kurang agar kompatibel
+            for col in EXPECTED_COLS:
+                if col not in df_new.columns:
+                    df_new[col] = ""
+            replace_all(df_new)
+            st.session_state.pegawai = load_data()
+            st.success("Data pegawai berhasil diimpor!")
 
         st.download_button(
             label="Unduh template CSV (header standar)",
@@ -297,7 +333,8 @@ elif menu == "Pegawai":
                 "UNOR INDUK": unor_induk,
                 "TMT JABATAN": str(tmt_jabatan),
             })
-            st.session_state.pegawai.loc[len(st.session_state.pegawai)] = new_row
+            save_row(new_row)
+            st.session_state.pegawai = load_data()
             st.success("Pegawai ditambahkan!")
 
         st.subheader("Edit / Hapus Pegawai")
@@ -306,7 +343,6 @@ elif menu == "Pegawai":
             df_match = st.session_state.pegawai[st.session_state.pegawai["NIP"].astype(str) == str(nip_search)]
             if not df_match.empty:
                 st.dataframe(df_match, use_container_width=True)
-                idx = df_match.index[0]
 
                 def default_tmt_value(val):
                     try:
@@ -324,15 +360,22 @@ elif menu == "Pegawai":
                     submit_edit = st.form_submit_button("Simpan Perubahan")
 
                 if submit_edit:
-                    st.session_state.pegawai.at[idx, "NAMA"] = nama_edit
-                    st.session_state.pegawai.at[idx, "NAMA JABATAN"] = jabatan_edit
-                    st.session_state.pegawai.at[idx, "NAMA UNOR"] = nama_unor_edit
-                    st.session_state.pegawai.at[idx, "UNOR INDUK"] = unor_induk_edit
-                    st.session_state.pegawai.at[idx, "TMT JABATAN"] = str(tmt_edit)
+                    updated_row = {col: str(df_match.iloc[0].get(col, "")) for col in EXPECTED_COLS}
+                    updated_row.update({
+                        "NIP": str(df_match.iloc[0].get("NIP", nip_search)),
+                        "NAMA": nama_edit,
+                        "NAMA JABATAN": jabatan_edit,
+                        "NAMA UNOR": nama_unor_edit,
+                        "UNOR INDUK": unor_induk_edit,
+                        "TMT JABATAN": str(tmt_edit),
+                    })
+                    save_row(updated_row)
+                    st.session_state.pegawai = load_data()
                     st.success("Data pegawai berhasil diperbarui!")
 
                 if st.button("Hapus Pegawai"):
-                    st.session_state.pegawai = st.session_state.pegawai.drop(df_match.index).reset_index(drop=True)
+                    delete_by_nip(nip_search)
+                    st.session_state.pegawai = load_data()
                     st.success("Pegawai berhasil dihapus!")
             else:
                 st.warning("Pegawai dengan NIP tersebut tidak ditemukan.")
@@ -417,7 +460,6 @@ elif menu == "Laporan":
     st.header("Laporan Pegawai")
     df = st.session_state.pegawai
     if not df.empty:
-        # Multi filter
         units = df["UNOR INDUK"].dropna().unique() if "UNOR INDUK" in df.columns else []
         jabatans = df["NAMA JABATAN"].dropna().unique() if "NAMA JABATAN" in df.columns else []
         pendidikans = df["TINGKAT PENDIDIKAN"].dropna().unique() if "TINGKAT PENDIDIKAN" in df.columns else []
@@ -437,10 +479,8 @@ elif menu == "Laporan":
                 df_filtered["NAMA"].astype(str).str.contains(search_term, case=False, na=False)
             ]
 
-        # Ringkasan
         st.metric("Total Pegawai", len(df_filtered))
 
-        # Grafik jumlah pegawai per UNOR INDUK
         if "UNOR INDUK" in df_filtered.columns and not df_filtered.empty:
             chart_df = df_filtered["UNOR INDUK"].astype(str).str.strip().value_counts().reset_index()
             chart_df.columns = ["UNOR INDUK","JUMLAH"]
@@ -452,7 +492,6 @@ elif menu == "Laporan":
             st.info("Kolom UNOR INDUK tidak ditemukan atau data kosong.")
 
         st.markdown("---")
-        # Tabel nominatif + ekspor
         cols_show = ["NAMA","NIP","NAMA JABATAN","JENIS JABATAN","UNOR INDUK","NAMA UNOR","TMT JABATAN"]
         cols_show = [c for c in cols_show if c in df_filtered.columns]
         st.dataframe(df_filtered[cols_show], use_container_width=True)
@@ -523,91 +562,6 @@ elif menu == "Laporan":
             st.plotly_chart(fig_pend, use_container_width=True)
         else:
             st.info("Kolom TINGKAT PENDIDIKAN belum tersedia.")
-
-        # Tren Jabatan per Tahun & Bulan
-        st.markdown("---")
-        st.subheader("Tren Jabatan per Tahun (berdasarkan TMT JABATAN)")
-        if "TMT JABATAN" in df_filtered.columns:
-            df_ts = df_filtered.copy()
-            df_ts["TMT JABATAN"] = pd.to_datetime(df_ts["TMT JABATAN"], errors="coerce")
-            df_ts = df_ts.dropna(subset=["TMT JABATAN"])
-            if not df_ts.empty:
-                rekap_tahun = df_ts.groupby(df_ts["TMT JABATAN"].dt.year).size().reset_index(name="JUMLAH")
-                rekap_tahun.columns = ["TAHUN","JUMLAH"]
-                fig_tren = px.line(rekap_tahun, x="TAHUN", y="JUMLAH", markers=True,
-                                   title="Jumlah Pegawai berdasarkan TMT JABATAN per Tahun")
-                st.plotly_chart(fig_tren, use_container_width=True)
-
-                tahun_list = sorted(df_ts["TMT JABATAN"].dt.year.unique())
-                tahun_pilih = st.selectbox("Pilih Tahun untuk Tren Bulanan", tahun_list) if len(tahun_list) > 0 else None
-                if tahun_pilih:
-                    df_year = df_ts[df_ts["TMT JABATAN"].dt.year == tahun_pilih]
-                    rekap_bulan = df_year.groupby(df_year["TMT JABATAN"].dt.month).size().reset_index(name="JUMLAH")
-                    rekap_bulan["BULAN"] = rekap_bulan["TMT JABATAN"].apply(lambda x: f"Bulan {x}")
-                    fig_bulan = px.bar(rekap_bulan, x="BULAN", y="JUMLAH", color="BULAN",
-                                       title=f"Distribusi Jabatan per Bulan • Tahun {tahun_pilih}")
-                    st.plotly_chart(fig_bulan, use_container_width=True)
-            else:
-                st.info("Tidak ada data TMT JABATAN yang valid.")
-        else:
-            st.info("Kolom TMT JABATAN belum tersedia.")
-
-        # Tren Pendidikan per Tahun
-        st.markdown("---")
-        st.subheader("Tren Pendidikan Pegawai per Tahun (berdasarkan TMT JABATAN)")
-        if "TMT JABATAN" in df_filtered.columns and "TINGKAT PENDIDIKAN" in df_filtered.columns:
-            df_pend_tren = df_filtered.copy()
-            df_pend_tren["TMT JABATAN"] = pd.to_datetime(df_pend_tren["TMT JABATAN"], errors="coerce")
-            df_pend_tren = df_pend_tren.dropna(subset=["TMT JABATAN"])
-            if not df_pend_tren.empty:
-                df_pend_tren["TAHUN"] = df_pend_tren["TMT JABATAN"].dt.year
-                norm_map = {
-                    "SD":"SD","SEKOLAH DASAR":"SD","ELEMENTARY SCHOOL":"SD",
-                    "SMP":"SMP","SEKOLAH MENENGAH PERTAMA":"SMP","JUNIOR HIGH":"SMP",
-                    "SMA":"SMA","SMU":"SMA","SMK":"SMA","MA":"SMA","HIGH SCHOOL":"SMA",
-                    "D1":"D1","DIPLOMA I":"D1",
-                    "D2":"D2","DIPLOMA II":"D2",
-                    "D3":"D3","DIPLOMA III":"D3","AHLI MADYA":"D3",
-                    "D4":"D4","DIPLOMA IV":"D4","SARJANA TERAPAN":"D4",
-                    "S1":"S1","SARJANA":"S1","UNDERGRADUATE":"S1","BACHELOR":"S1",
-                    "S2":"S2","MAGISTER":"S2","MASTER":"S2","POSTGRADUATE":"S2",
-                    "S3":"S3","DOKTOR":"S3","PHD":"S3","DOCTORATE":"S3"
-                }
-                df_pend_tren["TINGKAT PENDIDIKAN"] = df_pend_tren["TINGKAT PENDIDIKAN"].astype(str).str.strip().str.upper()
-                df_pend_tren["TINGKAT PENDIDIKAN"] = df_pend_tren["TINGKAT PENDIDIKAN"].map(lambda x: norm_map.get(x, x))
-                rekap_pend_tahun = df_pend_tren.groupby(["TAHUN","TINGKAT PENDIDIKAN"]).size().reset_index(name="JUMLAH")
-                fig_pend_tren = px.line(rekap_pend_tahun, x="TAHUN", y="JUMLAH", color="TINGKAT PENDIDIKAN",
-                                        markers=True, title="Tren Pendidikan Pegawai per Tahun")
-                st.plotly_chart(fig_pend_tren, use_container_width=True)
-            else:
-                st.info("Tidak ada data TMT JABATAN yang valid untuk rekap pendidikan.")
-        else:
-            st.info("Kolom TMT JABATAN atau TINGKAT PENDIDIKAN belum tersedia.")
-
-        # Tren Gender per Tahun
-        st.markdown("---")
-        st.subheader("Tren Gender Pegawai per Tahun (berdasarkan TMT JABATAN)")
-        if "TMT JABATAN" in df_filtered.columns and "JENIS KELAMIN" in df_filtered.columns:
-            df_gender_tren = df_filtered.copy()
-            df_gender_tren["TMT JABATAN"] = pd.to_datetime(df_gender_tren["TMT JABATAN"], errors="coerce")
-            df_gender_tren = df_gender_tren.dropna(subset=["TMT JABATAN"])
-            if not df_gender_tren.empty:
-                df_gender_tren["TAHUN"] = df_gender_tren["TMT JABATAN"].dt.year
-                label_map = {
-                    "M":"LAKI-LAKI","L":"LAKI-LAKI","PRIA":"LAKI-LAKI","LAKI-LAKI":"LAKI-LAKI",
-                    "F":"PEREMPUAN","P":"PEREMPUAN","WANITA":"PEREMPUAN","PEREMPUAN":"PEREMPUAN"
-                }
-                df_gender_tren["JENIS KELAMIN"] = df_gender_tren["JENIS KELAMIN"].astype(str).str.strip().str.upper()
-                df_gender_tren["JENIS KELAMIN"] = df_gender_tren["JENIS KELAMIN"].map(lambda x: label_map.get(x, x))
-                rekap_gender_tahun = df_gender_tren.groupby(["TAHUN","JENIS KELAMIN"]).size().reset_index(name="JUMLAH")
-                fig_gender_tren = px.line(rekap_gender_tahun, x="TAHUN", y="JUMLAH", color="JENIS KELAMIN",
-                                          markers=True, title="Tren Gender Pegawai per Tahun",
-                                          color_discrete_map={"LAKI-LAKI": COLOR_MAP["LAKI-LAKI"], "PEREMPUAN": COLOR_MAP["PEREMPUAN"]})
-                st.plotly_chart(fig_gender_tren, use_container_width=True)
-            else:
-                st.info("Tidak ada data TMT JABATAN yang valid untuk rekap gender.")
-        else:
-            st.info("Kolom TMT JABATAN atau JENIS KELAMIN belum tersedia.")
     else:
         st.info("Belum ada data pegawai untuk ditampilkan.")
 
@@ -650,7 +604,6 @@ elif menu == "Rekapitulasi":
     else:
         st.info("Kolom TMT JABATAN belum tersedia atau kosong.")
 
-    # Indikator hak akses di Rekapitulasi
     if is_admin():
         st.success("Anda Admin: punya akses penuh termasuk Backup/Hapus Data.")
     elif is_supervisor():
@@ -689,14 +642,14 @@ elif menu == "Profil Pegawai":
             <div style="padding:20px;border-radius:12px;background:#f5f5f5;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
                 <h3 style="color:#2196f3;">{pegawai.get("NAMA","")}</h3>
                 <p><b>NIP:</b> {pegawai.get("NIP","")}</p>
-                <p><b>Jabatan:</b> {pegawai.get("NAMA_JABATAN","")} • {pegawai.get("JENIS_JABATAN","")}</p>
-                <p><b>Unit:</b> {pegawai.get("NAMA_UNOR","")} / {pegawai.get("UNOR_INDUK","")}</p>
-                <p><b>TMT Jabatan:</b> {pegawai.get("TMT_JABATAN","")}</p>
-                <p><b>Jenis Kelamin:</b> {pegawai.get("JENIS_KELAMIN","")}</p>
-                <p><b>Tanggal Lahir:</b> {pegawai.get("TANGGAL_LAHIR","")}</p>
-                <p><b>Pendidikan:</b> {pegawai.get("TINGKAT_PENDIDIKAN","")} - {pegawai.get("NAMA_PENDIDIKAN","")}</p>
+                <p><b>Jabatan:</b> {pegawai.get("NAMA JABATAN","")} • {pegawai.get("JENIS JABATAN","")}</p>
+                <p><b>Unit:</b> {pegawai.get("NAMA UNOR","")} / {pegawai.get("UNOR INDUK","")}</p>
+                <p><b>TMT Jabatan:</b> {pegawai.get("TMT JABATAN","")}</p>
+                <p><b>Jenis Kelamin:</b> {pegawai.get("JENIS KELAMIN","")}</p>
+                <p><b>Tanggal Lahir:</b> {pegawai.get("TANGGAL LAHIR","")}</p>
+                <p><b>Pendidikan:</b> {pegawai.get("TINGKAT PENDIDIKAN","")} - {pegawai.get("NAMA PENDIDIKAN","")}</p>
                 <p><b>Email:</b> {pegawai.get("EMAIL","")}</p>
-                <p><b>Nomor HP:</b> {pegawai.get("NOMOR_HP","")}</p>
+                <p><b>Nomor HP:</b> {pegawai.get("NOMOR HP","")}</p>
                 <p><b>Alamat:</b> {pegawai.get("ALAMAT","")}</p>
             </div>
             """, unsafe_allow_html=True)
@@ -738,8 +691,9 @@ elif menu == "Profil Pegawai":
                         "JENIS_KELAMIN","TANGGAL_LAHIR","TINGKAT_PENDIDIKAN","NAMA_PENDIDIKAN","EMAIL","NOMOR_HP","ALAMAT"
                     ]
                     for key in labels:
-                        val = str(data.get(key, ""))
-                        pdf.cell(60, 9, key, border=1)
+                        key_db = key.replace("_", " ")
+                        val = str(data.get(key, data.get(key_db, "")))
+                        pdf.cell(60, 9, key_db, border=1)
                         pdf.cell(0, 9, val, border=1, ln=True)
                     return pdf.output(dest="S").encode("latin-1")
 
@@ -749,39 +703,22 @@ elif menu == "Profil Pegawai":
         else:
             st.warning("Pegawai tidak ditemukan. Masukkan NIP atau Nama yang valid.")
 
-
 # ================== Backup / Hapus Data ==================
 elif menu == "Backup/Hapus Data":
-    st.header("Backup & Hapus Data Pegawai")
+    st.header("Backup & Restore Data Pegawai")
     if is_admin():
-        df = st.session_state.pegawai
-
-        if not df.empty:
-            csv_data = df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="💾 Backup Data Pegawai (CSV)",
-                data=csv_data,
-                file_name="backup_pegawai.csv",
-                mime="text/csv"
-            )
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-                df.to_excel(writer, index=False, sheet_name="Pegawai")
-            excel_data = output.getvalue()
-            st.download_button(
-                label="💾 Backup Data Pegawai (Excel)",
-                data=excel_data,
-                file_name="backup_pegawai.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("Tidak ada data pegawai untuk dibackup.")
-
+        # Backup
+        backup_data()
         st.markdown("---")
-        st.warning("Aksi ini akan menghapus semua data pegawai dan tidak bisa dibatalkan.")
+        # Restore
+        restore_data()
+        st.markdown("---")
+        # Hapus semua data
+        st.warning("Aksi ini akan menghapus semua data pegawai di SQLite dan tidak bisa dibatalkan.")
         confirm = st.checkbox("Saya paham dan ingin menghapus semua data.")
         if st.button("🗑️ Hapus Semua Data Pegawai", disabled=not confirm):
-            st.session_state.pegawai = pd.DataFrame(columns=EXPECTED_COLS)
+            replace_all(pd.DataFrame(columns=EXPECTED_COLS))  # kosongkan tabel di DB
+            st.session_state.pegawai = load_data()
             st.success("Semua data pegawai berhasil dihapus!")
     else:
         st.warning("Menu ini hanya bisa diakses oleh Admin.")
@@ -790,6 +727,6 @@ elif menu == "Backup/Hapus Data":
 st.markdown("""
 <hr>
 <div style="text-align:center;color:gray;font-size:14px;">
-    © 2025 SIMPEG Dashboard • Dikembangkan oleh Tim IT • Powered by Streamlit
+    © 2025 SIMPEG Dashboard • Dikembangkan oleh Tim IT inka tmk • Powered by Streamlit
 </div>
 """, unsafe_allow_html=True)
