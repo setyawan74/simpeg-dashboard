@@ -6,23 +6,11 @@ from io import BytesIO
 from fpdf import FPDF
 import sqlite3
 import os
+import qrcode
 from datetime import date
 
 # ================== Konfigurasi Halaman ==================
-st.set_page_config(
-    page_title="SIMPEG Dashboard",
-    page_icon="👥",
-    layout="wide"
-)
-
-# ================== Palet Warna ==================
-COLOR_MAP = {
-    "LAKI-LAKI": "#2196f3",
-    "PEREMPUAN": "#e91e63",
-    "SD": "#8bc34a", "SMP": "#4caf50", "SMA": "#009688",
-    "D1": "#00bcd4", "D2": "#03a9f4", "D3": "#3f51b5", "D4": "#673ab7",
-    "S1": "#9c27b0", "S2": "#e91e63", "S3": "#f44336"
-}
+st.set_page_config(page_title="SIMPEG Dashboard", page_icon="👥", layout="wide")
 
 # ================== Struktur Data ==================
 EXPECTED_COLS = [
@@ -40,6 +28,10 @@ if "users" not in st.session_state:
         "admin": {
             "password_hash": bcrypt.hashpw("admin123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
             "role": "Admin"
+        },
+        "supervisor": {
+            "password_hash": bcrypt.hashpw("super123".encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
+            "role": "Supervisor"
         }
     }
 if "auth" not in st.session_state:
@@ -53,24 +45,17 @@ def conn_db():
     return sqlite3.connect(DB_FILE)
 
 def init_db():
-    """Buat tabel pegawai jika belum ada, lalu pastikan kolom lengkap tanpa drop data."""
     with conn_db() as conn:
         cur = conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS pegawai (
-            NIP TEXT PRIMARY KEY
-        )
-        """)
+        cur.execute("CREATE TABLE IF NOT EXISTS pegawai (NIP TEXT PRIMARY KEY)")
         conn.commit()
     ensure_columns()
 
 def ensure_columns():
-    """Tambahkan kolom-kolom yang belum ada agar sesuai EXPECTED_COLS, tanpa menghapus data lama."""
     with conn_db() as conn:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(pegawai)")
         existing_cols = [row[1] for row in cur.fetchall()]
-        # Tambah kolom yang belum ada; gunakan quote agar aman untuk nama dengan spasi
         for col in EXPECTED_COLS:
             if col not in existing_cols:
                 cur.execute(f"ALTER TABLE pegawai ADD COLUMN '{col}' TEXT")
@@ -81,19 +66,14 @@ def load_data():
         return pd.read_sql_query("SELECT * FROM pegawai", conn)
 
 def save_row(row: dict):
-    """Insert/replace satu baris berdasarkan NIP."""
     for col in EXPECTED_COLS:
         row.setdefault(col, "")
     with conn_db() as conn:
         cols = list(row.keys())
         placeholders = ",".join(["?"] * len(cols))
         values = [row.get(c, "") for c in cols]
-        # Quote setiap nama kolom agar aman terhadap spasi
         quoted_cols = ",".join([f'"{c}"' for c in cols])
-        conn.execute(
-            f"INSERT OR REPLACE INTO pegawai ({quoted_cols}) VALUES ({placeholders})",
-            values
-        )
+        conn.execute(f"INSERT OR REPLACE INTO pegawai ({quoted_cols}) VALUES ({placeholders})", values)
         conn.commit()
 
 def delete_by_nip(nip: str):
@@ -102,12 +82,9 @@ def delete_by_nip(nip: str):
         conn.commit()
 
 def replace_all(df: pd.DataFrame):
-    """Ganti seluruh isi tabel pegawai dengan df; tambahkan kolom yang kurang, urutkan sesuai EXPECTED_COLS."""
-    # Tambahkan kolom yang tidak ada dalam df
     for col in EXPECTED_COLS:
         if col not in df.columns:
             df[col] = ""
-    # Urutkan kolom
     df = df[EXPECTED_COLS]
     with conn_db() as conn:
         conn.execute("DELETE FROM pegawai")
@@ -119,21 +96,18 @@ def backup_data():
     df = load_data()
     st.subheader("Backup Data Pegawai")
     if not df.empty:
-        # Backup ke CSV
-        csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="💾 Backup Data Pegawai (CSV)",
-            data=csv_data,
+            "💾 Backup CSV",
+            df.to_csv(index=False).encode("utf-8"),
             file_name="backup_pegawai.csv",
             mime="text/csv"
         )
-        # Backup ke Excel
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        out = BytesIO()
+        with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
             df.to_excel(writer, index=False, sheet_name="Pegawai")
         st.download_button(
-            label="💾 Backup Data Pegawai (Excel)",
-            data=output.getvalue(),
+            "💾 Backup Excel",
+            out.getvalue(),
             file_name="backup_pegawai.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -146,68 +120,112 @@ def restore_data():
     if uploaded_file:
         df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
         df_new.columns = [str(c).strip().upper() for c in df_new.columns]
-        # Tambahkan kolom yang kurang agar sesuai EXPECTED_COLS
         for col in EXPECTED_COLS:
             if col not in df_new.columns:
                 df_new[col] = ""
-        df_new = df_new[EXPECTED_COLS]
-        replace_all(df_new)
+        replace_all(df_new[EXPECTED_COLS])
         st.session_state.pegawai = load_data()
-        st.success("Data pegawai berhasil direstore dari backup!")
+        st.success("Data pegawai berhasil direstore!")
 
-# Init DB & load pegawai
-init_db()
-if "pegawai" not in st.session_state:
-    st.session_state.pegawai = load_data()
+# ================== Modul PDF ==================
+def generate_pdf_resmi(data: dict, foto_path: str | None = None) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_fill_color(33, 150, 243)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 12, "PROFIL PEGAWAI", ln=True, align="C", fill=True)
+    pdf.ln(8)
+    if foto_path and os.path.exists(foto_path):
+        try:
+            pdf.image(foto_path, x=160, y=22, w=30, h=40)
+        except:
+            pass
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", size=12)
+    pdf.ln(20)
+    labels = [
+        "NAMA","NIP","NAMA_JABATAN","JENIS_JABATAN","NAMA_UNOR","UNOR_INDUK","TMT_JABATAN",
+        "JENIS_KELAMIN","TANGGAL_LAHIR","TINGKAT_PENDIDIKAN","NAMA_PENDIDIKAN","EMAIL","NOMOR_HP","ALAMAT"
+    ]
+    for key in labels:
+        key_db = key.replace("_", " ")
+        val = str(data.get(key, data.get(key_db, "")))
+        pdf.cell(60, 9, key_db, border=1)
+        pdf.cell(0, 9, val, border=1, ln=True)
+    return bytes(pdf.output(dest="S"))
+
+def generate_id_card(pegawai: dict) -> bytes:
+    pdf = FPDF("P", "mm", (85, 54))
+    pdf.add_page()
+    pdf.set_fill_color(33, 150, 243)
+    pdf.rect(0, 0, 85, 54, "F")
+
+    foto_path = pegawai.get("FOTO", "")
+    if foto_path and os.path.exists(foto_path):
+        try:
+            pdf.image(foto_path, x=5, y=6, w=20, h=24)
+        except:
+            pass
+
+    nama = str(pegawai.get("NAMA", "")).strip()
+    nip = str(pegawai.get("NIP", "")).strip()
+    jabatan = str(pegawai.get("NAMA JABATAN", "")).strip()
+    unit = str(pegawai.get("NAMA UNOR", "")).strip()
+
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Arial", "B", 12)
+    pdf.text(30, 10, nama[:28])
+    pdf.set_font("Arial", "", 10)
+    pdf.text(30, 16, f"NIP: {nip[:25]}")
+    pdf.text(30, 22, f"Jabatan: {jabatan[:25]}")
+    pdf.text(30, 28, f"Unit: {unit[:25]}")
+
+    qr_img = qrcode.make(nip or "NIP")
+    qr_path = os.path.join("images", f"qr_{nip or 'temp'}.png")
+    qr_img.save(qr_path)
+    try:
+        pdf.image(qr_path, x=62, y=30, w=20, h=20)
+    except:
+        pass
+
+    pdf.set_font("Arial", "B", 9)
+    pdf.text(5, 50, "SIMPEG - Kartu Pegawai")
+
+    return bytes(pdf.output(dest="S"))
 
 # ================== Auth helpers ==================
-def login(username, password):
-    if username in st.session_state.users:
-        info = st.session_state.users[username]
-        if bcrypt.checkpw(password.encode("utf-8"), info["password_hash"].encode("utf-8")):
-            st.session_state.auth = {"logged_in": True, "username": username, "role": info["role"]}
+def login(u, p):
+    if u in st.session_state.users:
+        info = st.session_state.users[u]
+        if bcrypt.checkpw(p.encode("utf-8"), info["password_hash"].encode("utf-8")):
+            st.session_state.auth = {"logged_in": True, "username": u, "role": info["role"]}
             return True
     return False
 
 def logout():
     st.session_state.auth = {"logged_in": False, "username": None, "role": None}
 
-def is_admin(): return st.session_state.auth["role"] == "Admin"
-def is_supervisor(): return st.session_state.auth["role"] == "Supervisor"
+def is_admin():
+    return st.session_state.auth["role"] == "Admin"
 
-# ================== CSS & Header ==================
-st.markdown("""
-    <style>
-    .card {
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        text-align: center;
-        width: 100%;
-        height: 130px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        color: white;
-    }
-    .card h4 { margin: 0; font-size: 16px; font-weight: bold; }
-    .card h2 { margin: 5px 0 0 0; font-size: 28px; }
-    </style>
-""", unsafe_allow_html=True)
+def is_supervisor():
+    return st.session_state.auth["role"] == "Supervisor"
 
-st.markdown('<h1 style="text-align:center;">SISTEM INFORMASI KEPEGAWAIAN</h1>', unsafe_allow_html=True)
-st.markdown('<h3 style="text-align:center;color:gray;">Halaman Admin/User/Supervisor</h3>', unsafe_allow_html=True)
+# ================== Init DB & Login ==================
+init_db()
+if "pegawai" not in st.session_state:
+    st.session_state.pegawai = load_data()
 
-# ================== Login ==================
 if not st.session_state.auth["logged_in"]:
     st.sidebar.title("Login")
     with st.sidebar.form("login_form"):
-        user = st.text_input("Username")
-        pw = st.text_input("Password", type="password")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
         submit_login = st.form_submit_button("Masuk")
     if submit_login:
-        if login(user, pw):
-            st.success(f"Login berhasil! Selamat datang, {user}.")
+        if login(u, p):
+            st.success(f"Selamat datang, {u}")
         else:
             st.error("Login gagal. Periksa username/password.")
     st.stop()
@@ -216,12 +234,28 @@ if not st.session_state.auth["logged_in"]:
 st.sidebar.title("PANEL")
 menu = st.sidebar.radio(
     "Navigasi",
-    ["Dashboard", "Pegawai", "Pegawai Grafik", "Laporan", "Rekapitulasi", "Profil Pegawai", "Backup/Hapus Data"]
+    ["Dashboard", "Pegawai", "Pegawai Grafik", "Laporan", "Rekapitulasi", "Profil Pegawai", "ID Card", "Backup/Hapus Data"]
 )
 st.sidebar.write(f"Login sebagai: {st.session_state.auth['username']} ({st.session_state.auth['role']})")
+if is_supervisor():
+    st.sidebar.markdown("🕵️ Anda login sebagai **Supervisor**")
+    st.sidebar.info("Hak akses: lihat data, grafik, laporan, profil, cetak ID Card")
 if st.sidebar.button("Logout"):
     logout()
     st.stop()
+
+# ================== CSS untuk Card ==================
+st.markdown("""
+<style>
+.card {
+    padding:20px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);
+    text-align:center;width:100%;height:130px;display:flex;flex-direction:column;
+    justify-content:center;color:white;
+}
+.card h4 {margin:0;font-size:16px;font-weight:bold;}
+.card h2 {margin:5px 0 0 0;font-size:28px;}
+</style>
+""", unsafe_allow_html=True)
 
 # ================== Dashboard ==================
 if menu == "Dashboard":
@@ -231,8 +265,8 @@ if menu == "Dashboard":
 
     if "JENIS KELAMIN" in df.columns and not df.empty:
         jk = df["JENIS KELAMIN"].astype(str).str.strip().str.upper()
-        laki = jk.isin(["M","LAKI-LAKI","L","PRIA"]).sum()
-        perempuan = jk.isin(["F","PEREMPUAN","P","WANITA"]).sum()
+        laki = jk.isin(["M", "LAKI-LAKI", "L", "PRIA"]).sum()
+        perempuan = jk.isin(["F", "PEREMPUAN", "P", "WANITA"]).sum()
     else:
         laki, perempuan = 0, 0
 
@@ -246,25 +280,25 @@ if menu == "Dashboard":
     with col4:
         st.markdown(f'<div class="card" style="background:linear-gradient(135deg,#4caf50,#81c784);">👥<h4>PEGAWAI</h4><h2>{total}</h2></div>', unsafe_allow_html=True)
 
-    # Pie chart gender
     if not df.empty and "JENIS KELAMIN" in df.columns:
         jk_series = df["JENIS KELAMIN"].astype(str).str.strip().str.upper()
-        label_map = {"M":"LAKI-LAKI","L":"LAKI-LAKI","PRIA":"LAKI-LAKI","LAKI-LAKI":"LAKI-LAKI",
-                     "F":"PEREMPUAN","P":"PEREMPUAN","WANITA":"PEREMPUAN","PEREMPUAN":"PEREMPUAN"}
+        label_map = {
+            "M": "LAKI-LAKI", "L": "LAKI-LAKI", "PRIA": "LAKI-LAKI", "LAKI-LAKI": "LAKI-LAKI",
+            "F": "PEREMPUAN", "P": "PEREMPUAN", "WANITA": "PEREMPUAN", "PEREMPUAN": "PEREMPUAN"
+        }
         jk_mapped = jk_series.map(lambda x: label_map.get(x, x))
         jk_counts = jk_mapped.value_counts().reset_index()
-        jk_counts.columns = ["Jenis Kelamin","Jumlah"]
+        jk_counts.columns = ["Jenis Kelamin", "Jumlah"]
         fig = px.pie(
             jk_counts,
             names="Jenis Kelamin",
             values="Jumlah",
             color="Jenis Kelamin",
-            color_discrete_map={"LAKI-LAKI": COLOR_MAP["LAKI-LAKI"], "PEREMPUAN": COLOR_MAP["PEREMPUAN"]},
+            color_discrete_map={"LAKI-LAKI": "#2196f3", "PEREMPUAN": "#e91e63"},
             title="Distribusi Gender Pegawai"
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # Manajemen user (Admin)
     if is_admin():
         st.markdown("---")
         st.subheader("➕ Tambah pengguna")
@@ -287,7 +321,7 @@ if menu == "Dashboard":
             use_container_width=True
         )
 
-# ================== Pegawai ==================
+# ================== Pegawai (CRUD + View) ==================
 elif menu == "Pegawai":
     st.header("Data Pegawai")
     df = st.session_state.pegawai
@@ -299,17 +333,16 @@ elif menu == "Pegawai":
         if uploaded_file:
             df_new = pd.read_csv(uploaded_file) if uploaded_file.name.endswith(".csv") else pd.read_excel(uploaded_file)
             df_new.columns = [str(c).strip().upper() for c in df_new.columns]
-            # Tambahkan kolom yang kurang agar kompatibel
             for col in EXPECTED_COLS:
                 if col not in df_new.columns:
                     df_new[col] = ""
-            replace_all(df_new)
+            replace_all(df_new[EXPECTED_COLS])
             st.session_state.pegawai = load_data()
             st.success("Data pegawai berhasil diimpor!")
 
         st.download_button(
-            label="Unduh template CSV (header standar)",
-            data=",".join(EXPECTED_COLS) + "\n",
+            "Unduh template CSV (header standar)",
+            (",".join(EXPECTED_COLS) + "\n"),
             file_name="template_simpeg.csv",
             mime="text/csv"
         )
@@ -380,7 +413,7 @@ elif menu == "Pegawai":
             else:
                 st.warning("Pegawai dengan NIP tersebut tidak ditemukan.")
     elif is_supervisor():
-        st.info("Anda login sebagai Supervisor. Hanya bisa melihat data pegawai.")
+        st.info("Anda login sebagai Supervisor. Hanya bisa melihat data pegawai (tanpa CRUD).")
     else:
         st.info("Anda login sebagai User. Hanya bisa melihat data pegawai.")
 
@@ -389,39 +422,39 @@ elif menu == "Pegawai Grafik":
     st.header("Grafik Pegawai")
     df = st.session_state.pegawai
 
-    # 1) Gender (bar chart)
-    st.subheader("Distribusi Gender Pegawai")
+    st.subheader("Distribusi Gender")
     if not df.empty and "JENIS KELAMIN" in df.columns:
         jk_series = df["JENIS KELAMIN"].astype(str).str.strip().str.upper()
         label_map = {
-            "M":"LAKI-LAKI","L":"LAKI-LAKI","PRIA":"LAKI-LAKI","LAKI-LAKI":"LAKI-LAKI",
-            "F":"PEREMPUAN","P":"PEREMPUAN","WANITA":"PEREMPUAN","PEREMPUAN":"PEREMPUAN"
+            "M": "LAKI-LAKI", "L": "LAKI-LAKI", "PRIA": "LAKI-LAKI", "LAKI-LAKI": "LAKI-LAKI",
+            "F": "PEREMPUAN", "P": "PEREMPUAN", "WANITA": "PEREMPUAN", "PEREMPUAN": "PEREMPUAN"
         }
         jk_mapped = jk_series.map(lambda x: label_map.get(x, x))
         jk_counts = jk_mapped.value_counts().reset_index()
-        jk_counts.columns = ["Jenis Kelamin","Jumlah"]
+        jk_counts.columns = ["Jenis Kelamin", "Jumlah"]
         fig_gender = px.bar(
             jk_counts, x="Jenis Kelamin", y="Jumlah", color="Jenis Kelamin",
-            color_discrete_map={"LAKI-LAKI": COLOR_MAP["LAKI-LAKI"], "PEREMPUAN": COLOR_MAP["PEREMPUAN"]},
+            color_discrete_map={"LAKI-LAKI": "#2196f3", "PEREMPUAN": "#e91e63"},
             title="Distribusi Gender Pegawai"
         )
         st.plotly_chart(fig_gender, use_container_width=True)
     else:
         st.info("Data pegawai atau kolom JENIS KELAMIN belum tersedia.")
 
-    # 2) Usia (bar chart per rentang)
-    st.subheader("Distribusi Usia Pegawai")
+    st.subheader("Distribusi Usia")
     if not df.empty and "TANGGAL LAHIR" in df.columns:
         df_age = df.copy()
         df_age["TANGGAL LAHIR"] = pd.to_datetime(df_age["TANGGAL LAHIR"], errors="coerce")
-        df_age["USIA"] = df_age["TANGGAL LAHIR"].apply(lambda x: (pd.Timestamp.today().year - x.year) if pd.notnull(x) else None)
+        df_age["USIA"] = df_age["TANGGAL LAHIR"].apply(
+            lambda x: (pd.Timestamp.today().year - x.year) if pd.notnull(x) else None
+        )
         usia_series = df_age["USIA"].dropna().astype(int)
         if not usia_series.empty:
             bins = [0, 20, 30, 40, 50, 60, 150]
             labels = ["<20", "20–29", "30–39", "40–49", "50–59", "60+"]
             usia_bucket = pd.cut(usia_series, bins=bins, labels=labels, right=False, include_lowest=True)
             usia_counts = usia_bucket.value_counts().reindex(labels).fillna(0).astype(int).reset_index()
-            usia_counts.columns = ["Rentang Usia","Jumlah"]
+            usia_counts.columns = ["Rentang Usia", "Jumlah"]
             fig_age = px.bar(usia_counts, x="Rentang Usia", y="Jumlah", color="Rentang Usia",
                              title="Distribusi Usia Pegawai")
             st.plotly_chart(fig_age, use_container_width=True)
@@ -430,25 +463,24 @@ elif menu == "Pegawai Grafik":
     else:
         st.info("Kolom TANGGAL LAHIR belum tersedia.")
 
-    # 3) Tingkat pendidikan (bar chart dengan normalisasi)
-    st.subheader("Distribusi Tingkat Pendidikan Pegawai")
+    st.subheader("Distribusi Tingkat Pendidikan")
     if not df.empty and "TINGKAT PENDIDIKAN" in df.columns:
         pend_series = df["TINGKAT PENDIDIKAN"].astype(str).str.strip().str.upper()
         norm_map = {
-            "SD":"SD","SEKOLAH DASAR":"SD","ELEMENTARY SCHOOL":"SD",
-            "SMP":"SMP","SEKOLAH MENENGAH PERTAMA":"SMP","JUNIOR HIGH":"SMP",
-            "SMA":"SMA","SMU":"SMA","SMK":"SMA","MA":"SMA","SEKOLAH MENENGAH ATAS":"SMA","HIGH SCHOOL":"SMA",
-            "D1":"D1","DIPLOMA I":"D1",
-            "D2":"D2","DIPLOMA II":"D2",
-            "D3":"D3","DIPLOMA III":"D3","AHLI MADYA":"D3",
-            "D4":"D4","DIPLOMA IV":"D4","SARJANA TERAPAN":"D4",
-            "S1":"S1","SARJANA":"S1","UNDERGRADUATE":"S1","BACHELOR":"S1",
-            "S2":"S2","MAGISTER":"S2","MASTER":"S2","POSTGRADUATE":"S2",
-            "S3":"S3","DOKTOR":"S3","PHD":"S3","DOCTORATE":"S3"
+            "SD": "SD", "SEKOLAH DASAR": "SD", "ELEMENTARY SCHOOL": "SD",
+            "SMP": "SMP", "SEKOLAH MENENGAH PERTAMA": "SMP", "JUNIOR HIGH": "SMP",
+            "SMA": "SMA", "SMU": "SMA", "SMK": "SMA", "MA": "SMA", "HIGH SCHOOL": "SMA",
+            "D1": "D1", "DIPLOMA I": "D1",
+            "D2": "D2", "DIPLOMA II": "D2",
+            "D3": "D3", "DIPLOMA III": "D3", "AHLI MADYA": "D3",
+            "D4": "D4", "DIPLOMA IV": "D4", "SARJANA TERAPAN": "D4",
+            "S1": "S1", "SARJANA": "S1", "UNDERGRADUATE": "S1", "BACHELOR": "S1",
+            "S2": "S2", "MAGISTER": "S2", "MASTER": "S2", "POSTGRADUATE": "S2",
+            "S3": "S3", "DOKTOR": "S3", "PHD": "S3", "DOCTORATE": "S3"
         }
         pend_norm = pend_series.map(lambda x: norm_map.get(x, x))
         pend_counts = pend_norm.value_counts().reset_index()
-        pend_counts.columns = ["Tingkat Pendidikan","Jumlah"]
+        pend_counts.columns = ["Tingkat Pendidikan", "Jumlah"]
         fig_pend = px.bar(pend_counts, x="Tingkat Pendidikan", y="Jumlah", color="Tingkat Pendidikan",
                           title="Distribusi Tingkat Pendidikan Pegawai")
         st.plotly_chart(fig_pend, use_container_width=True)
@@ -470,9 +502,12 @@ elif menu == "Laporan":
         search_term = st.text_input("Pencarian global (Nama/NIP)")
 
         df_filtered = df.copy()
-        if unit_filter: df_filtered = df_filtered[df_filtered["UNOR INDUK"].isin(unit_filter)]
-        if jabatan_filter: df_filtered = df_filtered[df_filtered["NAMA JABATAN"].isin(jabatan_filter)]
-        if pendidikan_filter: df_filtered = df_filtered[df_filtered["TINGKAT PENDIDIKAN"].isin(pendidikan_filter)]
+        if unit_filter:
+            df_filtered = df_filtered[df_filtered["UNOR INDUK"].isin(unit_filter)]
+        if jabatan_filter:
+            df_filtered = df_filtered[df_filtered["NAMA JABATAN"].isin(jabatan_filter)]
+        if pendidikan_filter:
+            df_filtered = df_filtered[df_filtered["TINGKAT PENDIDIKAN"].isin(pendidikan_filter)]
         if search_term:
             df_filtered = df_filtered[
                 df_filtered["NIP"].astype(str).str.contains(search_term, case=False, na=False) |
@@ -483,7 +518,7 @@ elif menu == "Laporan":
 
         if "UNOR INDUK" in df_filtered.columns and not df_filtered.empty:
             chart_df = df_filtered["UNOR INDUK"].astype(str).str.strip().value_counts().reset_index()
-            chart_df.columns = ["UNOR INDUK","JUMLAH"]
+            chart_df.columns = ["UNOR INDUK", "JUMLAH"]
             fig = px.bar(chart_df, x="UNOR INDUK", y="JUMLAH", color="UNOR INDUK",
                          title="Pegawai per Unit Organisasi",
                          color_discrete_sequence=px.colors.qualitative.Set2)
@@ -492,7 +527,7 @@ elif menu == "Laporan":
             st.info("Kolom UNOR INDUK tidak ditemukan atau data kosong.")
 
         st.markdown("---")
-        cols_show = ["NAMA","NIP","NAMA JABATAN","JENIS JABATAN","UNOR INDUK","NAMA UNOR","TMT JABATAN"]
+        cols_show = ["NAMA", "NIP", "NAMA JABATAN", "JENIS JABATAN", "UNOR INDUK", "NAMA UNOR", "TMT JABATAN"]
         cols_show = [c for c in cols_show if c in df_filtered.columns]
         st.dataframe(df_filtered[cols_show], use_container_width=True)
 
@@ -505,63 +540,18 @@ elif menu == "Laporan":
                 header_format = workbook.add_format({"bold": True, "bg_color": "#DCE6F1"})
                 for col_num, value in enumerate(df_filtered[cols_show].columns.values):
                     worksheet.write(0, col_num, value, header_format)
-            st.download_button("💾 Unduh Excel", out_xlsx.getvalue(),
-                               file_name="laporan_nominatif.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.download_button("💾 Unduh CSV",
-                               df_filtered[cols_show].to_csv(index=False).encode("utf-8"),
-                               file_name="laporan_nominatif.csv",
-                               mime="text/csv")
-
-        # Distribusi Usia
-        st.markdown("---")
-        st.subheader("Distribusi Usia Pegawai")
-        if "TANGGAL LAHIR" in df_filtered.columns:
-            df_age = df_filtered.copy()
-            df_age["TANGGAL LAHIR"] = pd.to_datetime(df_age["TANGGAL LAHIR"], errors="coerce")
-            df_age["USIA"] = df_age["TANGGAL LAHIR"].apply(
-                lambda x: (pd.Timestamp.today().year - x.year) if pd.notnull(x) else None
+            st.download_button(
+                "💾 Unduh Excel",
+                out_xlsx.getvalue(),
+                file_name="laporan_nominatif.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            usia_series = df_age["USIA"].dropna().astype(int)
-            if not usia_series.empty:
-                bins = [0, 20, 30, 40, 50, 60, 150]
-                labels = ["<20", "20–29", "30–39", "40–49", "50–59", "60+"]
-                usia_bucket = pd.cut(usia_series, bins=bins, labels=labels, right=False, include_lowest=True)
-                usia_counts = usia_bucket.value_counts().reindex(labels).fillna(0).astype(int).reset_index()
-                usia_counts.columns = ["Rentang Usia","Jumlah"]
-                fig_age = px.bar(usia_counts, x="Rentang Usia", y="Jumlah", color="Rentang Usia",
-                                 title="Distribusi Usia Pegawai")
-                st.plotly_chart(fig_age, use_container_width=True)
-            else:
-                st.info("Data usia pegawai tidak tersedia atau tidak valid.")
-        else:
-            st.info("Kolom TANGGAL LAHIR belum tersedia.")
-
-        # Distribusi Pendidikan
-        st.markdown("---")
-        st.subheader("Distribusi Tingkat Pendidikan Pegawai")
-        if "TINGKAT PENDIDIKAN" in df_filtered.columns:
-            pend_series = df_filtered["TINGKAT PENDIDIKAN"].astype(str).str.strip().str.upper()
-            norm_map = {
-                "SD":"SD","SEKOLAH DASAR":"SD","ELEMENTARY SCHOOL":"SD",
-                "SMP":"SMP","SEKOLAH MENENGAH PERTAMA":"SMP","JUNIOR HIGH":"SMP",
-                "SMA":"SMA","SMU":"SMA","SMK":"SMA","MA":"SMA","HIGH SCHOOL":"SMA",
-                "D1":"D1","DIPLOMA I":"D1",
-                "D2":"D2","DIPLOMA II":"D2",
-                "D3":"D3","DIPLOMA III":"D3","AHLI MADYA":"D3",
-                "D4":"D4","DIPLOMA IV":"D4","SARJANA TERAPAN":"D4",
-                "S1":"S1","SARJANA":"S1","UNDERGRADUATE":"S1","BACHELOR":"S1",
-                "S2":"S2","MAGISTER":"S2","MASTER":"S2","POSTGRADUATE":"S2",
-                "S3":"S3","DOKTOR":"S3","PHD":"S3","DOCTORATE":"S3"
-            }
-            pend_norm = pend_series.map(lambda x: norm_map.get(x, x))
-            pend_counts = pend_norm.value_counts().reset_index()
-            pend_counts.columns = ["Tingkat Pendidikan","Jumlah"]
-            fig_pend = px.bar(pend_counts, x="Tingkat Pendidikan", y="Jumlah", color="Tingkat Pendidikan",
-                              title="Distribusi Tingkat Pendidikan Pegawai")
-            st.plotly_chart(fig_pend, use_container_width=True)
-        else:
-            st.info("Kolom TINGKAT PENDIDIKAN belum tersedia.")
+            st.download_button(
+                "💾 Unduh CSV",
+                df_filtered[cols_show].to_csv(index=False).encode("utf-8"),
+                file_name="laporan_nominatif.csv",
+                mime="text/csv"
+            )
     else:
         st.info("Belum ada data pegawai untuk ditampilkan.")
 
@@ -604,13 +594,6 @@ elif menu == "Rekapitulasi":
     else:
         st.info("Kolom TMT JABATAN belum tersedia atau kosong.")
 
-    if is_admin():
-        st.success("Anda Admin: punya akses penuh termasuk Backup/Hapus Data.")
-    elif is_supervisor():
-        st.info("Anda Supervisor: bisa melihat tren, tanpa akses Backup/Hapus Data.")
-    else:
-        st.info("Anda User: hanya bisa melihat tren.")
-
 # ================== Profil Pegawai ==================
 elif menu == "Profil Pegawai":
     st.header("Profil Pegawai")
@@ -630,14 +613,12 @@ elif menu == "Profil Pegawai":
             pegawai = df_match.iloc[0].to_dict()
             nip_val = str(pegawai.get("NIP", ""))
 
-            # Foto
             foto_path = pegawai.get("FOTO", "")
             if isinstance(foto_path, str) and len(foto_path) > 0 and os.path.exists(foto_path):
                 st.image(foto_path, caption=f"Foto {pegawai.get('NAMA','')}", width=200)
             else:
                 st.info("Belum ada foto untuk pegawai ini.")
 
-            # Detail
             st.markdown(f"""
             <div style="padding:20px;border-radius:12px;background:#f5f5f5;box-shadow:0 2px 8px rgba(0,0,0,0.1);">
                 <h3 style="color:#2196f3;">{pegawai.get("NAMA","")}</h3>
@@ -654,10 +635,9 @@ elif menu == "Profil Pegawai":
             </div>
             """, unsafe_allow_html=True)
 
-            # Upload foto
             if is_admin() or is_supervisor():
                 st.subheader("Upload/Update Foto Pegawai")
-                foto_file = st.file_uploader("Pilih foto (jpg/png)", type=["jpg","jpeg","png"])
+                foto_file = st.file_uploader("Pilih foto (jpg/png)", type=["jpg", "jpeg", "png"])
                 if foto_file:
                     file_path = os.path.join("images", f"{nip_val}.jpg")
                     with open(file_path, "wb") as f:
@@ -667,57 +647,53 @@ elif menu == "Profil Pegawai":
                     st.session_state.pegawai = load_data()
                     st.success("Foto disimpan!")
 
-            # Ekspor PDF resmi + foto
             if is_admin() or is_supervisor():
-                st.subheader("Ekspor Profil Pegawai ke PDF (Resmi + Foto)")
-                def generate_pdf_resmi(data, foto_path=None):
-                    pdf = FPDF()
-                    pdf.add_page()
-                    pdf.set_fill_color(33, 150, 243)
-                    pdf.set_text_color(255, 255, 255)
-                    pdf.set_font("Arial", "B", 16)
-                    pdf.cell(0, 12, "PROFIL PEGAWAI", ln=True, align="C", fill=True)
-                    pdf.ln(8)
-                    if foto_path and os.path.exists(foto_path):
-                        try:
-                            pdf.image(foto_path, x=160, y=22, w=30, h=40)
-                        except:
-                            pass
-                    pdf.set_text_color(0, 0, 0)
-                    pdf.set_font("Arial", size=12)
-                    pdf.ln(20)
-                    labels = [
-                        "NAMA","NIP","NAMA_JABATAN","JENIS_JABATAN","NAMA_UNOR","UNOR_INDUK","TMT_JABATAN",
-                        "JENIS_KELAMIN","TANGGAL_LAHIR","TINGKAT_PENDIDIKAN","NAMA_PENDIDIKAN","EMAIL","NOMOR_HP","ALAMAT"
-                    ]
-                    for key in labels:
-                        key_db = key.replace("_", " ")
-                        val = str(data.get(key, data.get(key_db, "")))
-                        pdf.cell(60, 9, key_db, border=1)
-                        pdf.cell(0, 9, val, border=1, ln=True)
-                    return pdf.output(dest="S").encode("latin-1")
-
+                st.subheader("Ekspor Profil (PDF)")
                 pdf_data = generate_pdf_resmi(pegawai, foto_path=pegawai.get("FOTO", None))
-                st.download_button("💾 Unduh Profil (PDF)", pdf_data,
-                                   file_name=f"profil_{nip_val}.pdf", mime="application/pdf")
+                st.download_button(
+                    "💾 Unduh Profil (PDF)",
+                    pdf_data,
+                    file_name=f"profil_{nip_val}.pdf",
+                    mime="application/pdf"
+                )
         else:
             st.warning("Pegawai tidak ditemukan. Masukkan NIP atau Nama yang valid.")
 
-# ================== Backup / Hapus Data ==================
+# ================== ID Card ==================
+elif menu == "ID Card":
+    st.header("Cetak ID Card Pegawai")
+    df = st.session_state.pegawai
+    if df.empty:
+        st.info("Belum ada data pegawai.")
+    else:
+        nip_input = st.text_input("Masukkan NIP pegawai untuk ID Card")
+        df_match = df[df["NIP"].astype(str) == str(nip_input)] if nip_input else pd.DataFrame()
+        if not df_match.empty:
+            pegawai = df_match.iloc[0].to_dict()
+            st.write(f"Pegawai: {pegawai.get('NAMA','')} • NIP: {pegawai.get('NIP','')}")
+            pdf_data = generate_id_card(pegawai)
+            st.download_button(
+                "💳 Unduh ID Card (PDF)",
+                pdf_data,
+                file_name=f"idcard_{pegawai.get('NIP','')}.pdf",
+                mime="application/pdf"
+            )
+        else:
+            if nip_input:
+                st.warning("Pegawai tidak ditemukan. Periksa NIP.")
+
+# ================== Backup/Hapus Data ==================
 elif menu == "Backup/Hapus Data":
     st.header("Backup & Restore Data Pegawai")
     if is_admin():
-        # Backup
         backup_data()
         st.markdown("---")
-        # Restore
         restore_data()
         st.markdown("---")
-        # Hapus semua data
         st.warning("Aksi ini akan menghapus semua data pegawai di SQLite dan tidak bisa dibatalkan.")
         confirm = st.checkbox("Saya paham dan ingin menghapus semua data.")
         if st.button("🗑️ Hapus Semua Data Pegawai", disabled=not confirm):
-            replace_all(pd.DataFrame(columns=EXPECTED_COLS))  # kosongkan tabel di DB
+            replace_all(pd.DataFrame(columns=EXPECTED_COLS))
             st.session_state.pegawai = load_data()
             st.success("Semua data pegawai berhasil dihapus!")
     else:
@@ -727,6 +703,6 @@ elif menu == "Backup/Hapus Data":
 st.markdown("""
 <hr>
 <div style="text-align:center;color:gray;font-size:14px;">
-    © 2025 SIMPEG Dashboard • Dikembangkan oleh Tim IT inka tmk • Powered by Streamlit
+    © 2025 SIMPEG Dashboard • Dikembangkan oleh Tim IT • Powered by Streamlit
 </div>
 """, unsafe_allow_html=True)
