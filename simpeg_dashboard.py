@@ -122,7 +122,7 @@ def load_today_logs():
 
 def count_today_logs(): return len(load_today_logs())
 
-# ================== Modul PDF (fix bytes encoding) ==================
+# ================== PDF ==================
 def generate_pdf_resmi(data, foto_path=None):
     pdf = FPDF(); pdf.add_page()
     pdf.set_fill_color(33,150,243); pdf.set_text_color(255,255,255); pdf.set_font("Arial","B",16)
@@ -157,7 +157,7 @@ def generate_id_card(pegawai):
     pdf.set_font("Arial","B",8); pdf.text(5,50,"SIMPEG - Kartu Pegawai")
     return pdf.output(dest="S").encode("latin-1")
 
-# ================== Auth helpers (tanpa OTP) ==================
+# ================== Auth helpers ==================
 def login(u, p):
     if u in st.session_state.users:
         info = st.session_state.users[u]
@@ -371,6 +371,7 @@ elif menu == "Pegawai":
             nama = st.text_input("NAMA")
             nip = st.text_input("NIP")
             jabatan = st.text_input("NAMA JABATAN")
+            jenis_jabatan = st.text_input("JENIS JABATAN")
             nama_unor = st.text_input("NAMA UNOR")
             unor_induk = st.text_input("UNOR INDUK")
             tmt_jabatan = st.date_input("TMT JABATAN")
@@ -378,9 +379,8 @@ elif menu == "Pegawai":
         if submit and nama and nip:
             new_row = {col: "" for col in EXPECTED_COLS}
             new_row.update({
-                "NAMA": nama, "NIP": nip, "NAMA JABATAN": jabatan,
-                "NAMA UNOR": nama_unor, "UNOR INDUK": unor_induk,
-                "TMT JABATAN": str(tmt_jabatan),
+                "NAMA": nama, "NIP": nip, "NAMA JABATAN": jabatan, "JENIS JABATAN": jenis_jabatan,
+                "NAMA UNOR": nama_unor, "UNOR INDUK": unor_induk, "TMT JABATAN": str(tmt_jabatan),
             })
             save_row(new_row)
             log_action(st.session_state.auth["username"], st.session_state.auth["role"], "INSERT", nip)
@@ -399,6 +399,7 @@ elif menu == "Pegawai":
                 with st.form("edit_pegawai"):
                     nama_edit = st.text_input("NAMA", value=str(df_match.iloc[0].get("NAMA","")))
                     jabatan_edit = st.text_input("NAMA JABATAN", value=str(df_match.iloc[0].get("NAMA JABATAN","")))
+                    jenis_jabatan_edit = st.text_input("JENIS JABATAN", value=str(df_match.iloc[0].get("JENIS JABATAN","")))
                     nama_unor_edit = st.text_input("NAMA UNOR", value=str(df_match.iloc[0].get("NAMA UNOR","")))
                     unor_induk_edit = st.text_input("UNOR INDUK", value=str(df_match.iloc[0].get("UNOR INDUK","")))
                     tmt_raw = df_match.iloc[0].get("TMT JABATAN","")
@@ -410,6 +411,7 @@ elif menu == "Pegawai":
                         "NIP": str(df_match.iloc[0].get("NIP", nip_search)),
                         "NAMA": nama_edit,
                         "NAMA JABATAN": jabatan_edit,
+                        "JENIS JABATAN": jenis_jabatan_edit,
                         "NAMA UNOR": nama_unor_edit,
                         "UNOR INDUK": unor_induk_edit,
                         "TMT JABATAN": str(tmt_edit),
@@ -502,16 +504,19 @@ elif menu == "Laporan":
     if not df.empty:
         units = df["UNOR INDUK"].dropna().unique() if "UNOR INDUK" in df.columns else []
         jabatans = df["NAMA JABATAN"].dropna().unique() if "NAMA JABATAN" in df.columns else []
+        jenis_jabatans = df["JENIS JABATAN"].dropna().unique() if "JENIS JABATAN" in df.columns else []
         pendidikans = df["TINGKAT PENDIDIKAN"].dropna().unique() if "TINGKAT PENDIDIKAN" in df.columns else []
 
         unit_filter = st.multiselect("Filter UNOR INDUK", sorted(list(units)))
         jabatan_filter = st.multiselect("Filter Jabatan", sorted(list(jabatans)))
+        jenis_jabatan_filter = st.multiselect("Filter Jenis Jabatan", sorted(list(jenis_jabatans)))
         pendidikan_filter = st.multiselect("Filter Pendidikan", sorted(list(pendidikans)))
         search_term = st.text_input("Pencarian global (Nama/NIP)")
 
         df_filtered = df.copy()
         if unit_filter: df_filtered = df_filtered[df_filtered["UNOR INDUK"].isin(unit_filter)]
         if jabatan_filter: df_filtered = df_filtered[df_filtered["NAMA JABATAN"].isin(jabatan_filter)]
+        if jenis_jabatan_filter: df_filtered = df_filtered[df_filtered["JENIS JABATAN"].isin(jenis_jabatan_filter)]
         if pendidikan_filter: df_filtered = df_filtered[df_filtered["TINGKAT PENDIDIKAN"].isin(pendidikan_filter)]
         if search_term:
             df_filtered = df_filtered[
@@ -521,15 +526,29 @@ elif menu == "Laporan":
 
         st.metric("Total Pegawai", len(df_filtered))
 
+        # Grafik distribusi Unit
         if "UNOR INDUK" in df_filtered.columns and not df_filtered.empty:
             chart_df = df_filtered["UNOR INDUK"].astype(str).str.strip().value_counts().reset_index()
             chart_df.columns = ["UNOR INDUK","JUMLAH"]
-            fig = px.bar(chart_df, x="UNOR INDUK", y="JUMLAH", color="UNOR INDUK",
+            fig_unit = px.bar(chart_df, x="UNOR INDUK", y="JUMLAH", color="UNOR INDUK",
                          title="Pegawai per Unit Organisasi",
                          color_discrete_sequence=px.colors.qualitative.Set2)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig_unit, use_container_width=True)
         else:
             st.info("Kolom UNOR INDUK tidak ditemukan atau data kosong.")
+
+        # Grafik distribusi Jenis Jabatan
+        if "JENIS JABATAN" in df_filtered.columns and not df_filtered.empty:
+            jabatan_chart = df_filtered["JENIS JABATAN"].astype(str).str.strip().value_counts().reset_index()
+            jabatan_chart.columns = ["Jenis Jabatan","Jumlah"]
+            fig_jabatan = px.bar(
+                jabatan_chart,
+                x="Jenis Jabatan", y="Jumlah",
+                color="Jenis Jabatan",
+                title="Distribusi Pegawai per Jenis Jabatan",
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            st.plotly_chart(fig_jabatan, use_container_width=True)
 
         st.markdown("---")
         cols_show = ["NAMA","NIP","NAMA JABATAN","JENIS JABATAN","UNOR INDUK","NAMA UNOR","TMT JABATAN"]
